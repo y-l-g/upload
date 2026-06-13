@@ -53,8 +53,8 @@ as multiple upload intents.
 
 ## Native API
 
-The native API uses PHP arrays and binary-safe strings. Laravel and Symfony
-packages should wrap these functions in framework-native services.
+The native API uses PHP arrays and binary-safe strings. Framework code can wrap
+these functions in application-local services.
 
 ```php
 function pogo_upload_create(array $intent, string $store = 'default'): array;
@@ -327,120 +327,53 @@ Failure events are for cleanup and audit. A failed event handler error is logged
 and counted but does not change the HTTP response if the upload already failed
 for another reason.
 
-## Laravel
+## Framework Integration
 
-Install the package:
+This repository currently ships the native FrankenPHP module only. It does not
+contain `pogo/laravel-upload`, `pogo/symfony-upload`, facades, bundles, DTOs, or
+testing fakes.
 
-```bash
-composer require pogo/laravel-upload
-```
-
-Create upload intents from normal authenticated routes:
+Use normal Laravel, Symfony, or custom PHP controllers for authentication and
+business rules, then call the native API directly or through an application-local
+service:
 
 ```php
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Route;
-use Illuminate\Support\Str;
-use Pogo\Upload\Laravel\Facades\PogoUpload;
-
-Route::post('/uploads/avatar', function (Request $request) {
-    $request->validate([
-        'filename' => ['required', 'string', 'max:255'],
-        'content_type' => ['required', 'in:image/jpeg,image/png'],
-        'size' => ['required', 'integer', 'max:5242880'],
-    ]);
-
-    return PogoUpload::create([
-        'key' => 'users/'.$request->user()->id.'/avatars/'.Str::uuid(),
-        'filename' => $request->string('filename')->toString(),
-        'content_types' => [$request->string('content_type')->toString()],
-        'max_bytes' => (int) $request->integer('size'),
-        'metadata' => [
-            'user_id' => (string) $request->user()->id,
-            'purpose' => 'avatar',
-        ],
-    ]);
-});
+$intent = pogo_upload_create([
+    'key' => 'users/'.$userId.'/avatars/'.bin2hex(random_bytes(16)).'.jpg',
+    'filename' => 'avatar.jpg',
+    'content_types' => ['image/jpeg', 'image/png'],
+    'max_bytes' => 5242880,
+    'metadata' => [
+        'user_id' => (string) $userId,
+        'purpose' => 'avatar',
+    ],
+]);
 ```
 
-Handle completion in `public/upload-worker.php`:
+Handle completion and failure events in `public/upload-worker.php`:
 
 ```php
 <?php
 
-use Laravel\Octane\ApplicationFactory;
-use Laravel\Octane\FrankenPhp\FrankenPhpClient;
-use Laravel\Octane\Worker;
-
 require_once dirname(__DIR__).'/vendor/autoload.php';
 
-$worker = tap(new Worker(
-    new ApplicationFactory(dirname(__DIR__)),
-    new FrankenPhpClient()
-))->boot();
+while (frankenphp_handle_request(static function (string $message): string {
+    $event = json_decode($message, true, flags: JSON_THROW_ON_ERROR);
 
-try {
-    while (frankenphp_handle_request(static function (string $message) use ($worker): string {
-        $event = json_decode($message, true, flags: JSON_THROW_ON_ERROR);
-        $app = $worker->application();
+    // Resolve your application container here and persist the completed or
+    // failed upload event in your own database.
+    handle_upload_event($event);
 
-        $handler = $app->make(App\Uploads\PogoUploadHandler::class);
-        $handler->handle($event);
-
-        return json_encode(['ok' => true], JSON_THROW_ON_ERROR);
-    })) {
-        gc_collect_cycles();
-    }
-} finally {
-    $worker->terminate();
+    return json_encode(['ok' => true], JSON_THROW_ON_ERROR);
+})) {
+    gc_collect_cycles();
 }
 ```
 
-The Laravel package should provide a facade/service, config mapping for store
-names, typed event objects, and testing fakes. It should not replace Laravel's
-normal `UploadedFile` handling.
-
-## Symfony
-
-Install the package:
-
-```bash
-composer require pogo/symfony-upload
-```
-
-Use a service from normal authenticated controllers:
-
-```php
-use Pogo\Upload\Symfony\PogoUpload;
-use Symfony\Component\HttpFoundation\JsonResponse;
-use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\Routing\Attribute\Route;
-
-final readonly class UploadController
-{
-    public function __construct(private PogoUpload $uploads) {}
-
-    #[Route('/uploads/avatar', methods: ['POST'])]
-    public function avatar(Request $request): JsonResponse
-    {
-        $user = $request->attributes->get('user');
-
-        return new JsonResponse($this->uploads->create([
-            'key' => 'users/'.$user->getId().'/avatars/'.bin2hex(random_bytes(16)),
-            'filename' => (string) $request->request->get('filename'),
-            'content_types' => [(string) $request->request->get('content_type')],
-            'max_bytes' => min((int) $request->request->get('size'), 5242880),
-            'metadata' => [
-                'user_id' => (string) $user->getId(),
-                'purpose' => 'avatar',
-            ],
-        ]));
-    }
-}
-```
-
-The Symfony package should provide a service, typed event DTOs, an optional
-Messenger bridge for application-side post-processing, and test helpers.
+Framework adapters can be added later on top of this contract. They should not
+replace Laravel's or Symfony's normal `UploadedFile` handling for small forms;
+their job would be to wrap intent creation, expose typed worker events, and add
+test helpers for application code.
 
 ## Architecture
 
@@ -451,8 +384,8 @@ Pogo Upload has four layers:
    pools, and metrics.
 3. A Caddy HTTP handler validates upload tokens and streams request bodies to
    the selected store backend.
-4. Framework packages wrap the native API and translate worker events into
-   Laravel/Symfony-friendly services and DTOs.
+4. Application code or future framework adapters wrap the native API and
+   translate worker events into framework-friendly services and DTOs.
 
 The Go upload path should avoid buffering whole files in memory. It reads the
 request body in fixed-size chunks, updates progress and checksum state, writes to
