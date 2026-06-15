@@ -47,7 +47,11 @@ type uploadFailure struct {
 }
 
 func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	m := currentManager()
+	m := h.manager
+	if m == nil {
+		// Direct tests and the PHP extension bridge still use the package-global manager path.
+		m = currentManager()
+	}
 	store, apiErr := m.store(h.Store)
 	if apiErr != nil {
 		writeUploadError(w, http.StatusServiceUnavailable, "", "unavailable", apiErr.Error())

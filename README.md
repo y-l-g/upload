@@ -221,7 +221,7 @@ backend or worker failures.
 }
 
 :80 {
-    handle /_pogo/upload/* {
+    route /_pogo/upload/* {
         pogo_upload default
     }
 
@@ -249,7 +249,7 @@ Store directives:
 The HTTP handler directive receives the store name:
 
 ```caddy
-handle /_pogo/upload/* {
+route /_pogo/upload/* {
     pogo_upload default
 }
 ```
@@ -393,8 +393,9 @@ the backend, and aborts as soon as a limit or context cancellation is reached.
 
 ## Semantics
 
-- Upload URLs are single-use by default. Reusing a completed upload token returns
-  a conflict response while its progress record is still known.
+- Upload URLs are single-use by default within the accepting process until their
+  signed expiry. Reusing an accepted token returns a conflict response even after
+  its finished progress record is no longer visible.
 - Backend writes use a temporary object or file and commit to the final key only
   after the body is fully received and validated. If `overwrite` is false and the
   final key already exists, the temporary object is deleted and the request fails.
@@ -418,9 +419,32 @@ the backend, and aborts as soon as a limit or context cancellation is reached.
 - Do not trust filenames or content types for file safety.
 - Store objects outside the public web root unless the application explicitly
   publishes them.
+- Keep the local backend root and its parent directories owned by the
+  application/runtime user and not writable by untrusted users.
 - Normalize and validate keys before signing.
 - Do not include secrets, full tokens, or user-provided metadata in logs or
   metrics.
+
+## Development
+
+Tests live under `module/` and must run with a PHP ZTS/FrankenPHP toolchain for
+CGO. A plain `go test` can fail before module code is tested if PHP headers and
+libraries are not on the CGO paths.
+
+Local host toolchain:
+
+```bash
+cd module
+PHP_PREFIX="$HOME/.local/frankenphp/php-8.5-zts" \
+PATH="$HOME/.local/frankenphp/php-8.5-zts/bin:$PATH" \
+PHP_CONFIG="$HOME/.local/frankenphp/php-8.5-zts/bin/php-config" \
+CGO_ENABLED=1 \
+CGO_CFLAGS="-D_GNU_SOURCE -g -O0 $($HOME/.local/frankenphp/php-8.5-zts/bin/php-config --includes)" \
+CGO_CPPFLAGS="$($HOME/.local/frankenphp/php-8.5-zts/bin/php-config --includes)" \
+CGO_LDFLAGS="-L$HOME/.local/frankenphp/php-8.5-zts/lib -Wl,-rpath,$HOME/.local/frankenphp/php-8.5-zts/lib $($HOME/.local/frankenphp/php-8.5-zts/bin/php-config --ldflags) $($HOME/.local/frankenphp/php-8.5-zts/bin/php-config --libs)" \
+GOCACHE=/tmp/pogos-upload-go-cache \
+go test -count=1 -tags=nobadger,nomysql,nopgx,nowatcher -mod=readonly ./...
+```
 
 ## Non-Goals
 

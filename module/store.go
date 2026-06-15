@@ -104,11 +104,17 @@ func (p *localPendingObject) Commit(_ context.Context, key string, overwrite boo
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return err
 	}
+	if err := ensureNoSymlinkAncestors(p.root, key); err != nil {
+		return err
+	}
 	if err := p.file.Close(); err != nil {
 		return err
 	}
 
 	if overwrite {
+		if err := ensureNotSymlinkTarget(target); err != nil {
+			return err
+		}
 		if err := os.Rename(p.tmp, target); err != nil {
 			return err
 		}
@@ -182,6 +188,20 @@ func ensureNoSymlinkAncestors(root string, key string) error {
 		if !info.IsDir() {
 			return fmt.Errorf("%w: non-directory ancestor in %s", errObjectPath, key)
 		}
+	}
+	return nil
+}
+
+func ensureNotSymlinkTarget(target string) error {
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: symlink target in %s", errObjectPath, target)
 	}
 	return nil
 }

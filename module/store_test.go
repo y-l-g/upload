@@ -86,3 +86,67 @@ func TestLocalStoreCommitRejectsSymlinkAncestors(t *testing.T) {
 	}
 	_ = pending.Abort(context.Background())
 }
+
+func TestLocalStoreCommitRejectsSymlinkTargetWhenOverwriteTrue(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o640); err != nil {
+		t.Fatalf("seed outside file failed: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "avatar.txt")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	store := newLocalStore(root)
+	pending, err := store.Begin(context.Background(), "upl_test")
+	if err != nil {
+		t.Fatalf("begin failed: %v", err)
+	}
+	if _, err := pending.Write([]byte("new")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if err := pending.Commit(context.Background(), "avatar.txt", true); !errors.Is(err, errObjectPath) {
+		t.Fatalf("expected object path error, got %v", err)
+	}
+	_ = pending.Abort(context.Background())
+
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read outside file failed: %v", err)
+	}
+	if string(data) != "outside" {
+		t.Fatalf("outside file was overwritten: %q", data)
+	}
+}
+
+func TestLocalStoreCommitRejectsSymlinkTargetWhenOverwriteFalse(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o640); err != nil {
+		t.Fatalf("seed outside file failed: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "avatar.txt")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	store := newLocalStore(root)
+	pending, err := store.Begin(context.Background(), "upl_test")
+	if err != nil {
+		t.Fatalf("begin failed: %v", err)
+	}
+	if _, err := pending.Write([]byte("new")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if err := pending.Commit(context.Background(), "avatar.txt", false); !errors.Is(err, errObjectExists) {
+		t.Fatalf("expected object exists error, got %v", err)
+	}
+	_ = pending.Abort(context.Background())
+
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read outside file failed: %v", err)
+	}
+	if string(data) != "outside" {
+		t.Fatalf("outside file was overwritten: %q", data)
+	}
+}

@@ -59,6 +59,8 @@ type BackendConfig struct {
 
 type UploadHandler struct {
 	Store string `json:"store,omitempty"`
+
+	manager *manager
 }
 
 func (Upload) CaddyModule() caddy.ModuleInfo {
@@ -124,6 +126,37 @@ func (u *Upload) Cleanup() error {
 	return nil
 }
 
+func (u *Upload) Start() error {
+	return nil
+}
+
+func (u *Upload) Stop() error {
+	return u.Cleanup()
+}
+
+func (h *UploadHandler) Provision(ctx caddy.Context) error {
+	app, err := ctx.App("pogo_upload")
+	if err != nil {
+		return fmt.Errorf("pogo_upload handler: %w", err)
+	}
+	uploadApp, ok := app.(*Upload)
+	if !ok {
+		return fmt.Errorf(`expected ctx.App("pogo_upload") to return *Upload, got %T`, app)
+	}
+	if uploadApp.manager == nil {
+		return fmt.Errorf("pogo_upload handler: app manager is not provisioned")
+	}
+
+	if h.Store == "" {
+		h.Store = defaultStoreName
+	}
+	if _, apiErr := uploadApp.manager.store(h.Store); apiErr != nil {
+		return fmt.Errorf("pogo_upload handler store %q: %w", h.Store, apiErr)
+	}
+	h.manager = uploadApp.manager
+	return nil
+}
+
 func (u *Upload) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
 		for d.NextBlock(0) {
@@ -175,28 +208,32 @@ func unmarshalStore(d *caddyfile.Dispenser) (StoreConfig, error) {
 	for d.NextBlock(1) {
 		switch d.Val() {
 		case "worker":
-			if !d.NextArg() {
-				return cfg, d.ArgErr()
+			value, err := parseSingleArgDirective(d, "worker")
+			if err != nil {
+				return cfg, err
 			}
-			cfg.Worker = d.Val()
+			cfg.Worker = value
 		case "signing_secret":
-			if !d.NextArg() {
-				return cfg, d.ArgErr()
+			value, err := parseSingleArgDirective(d, "signing_secret")
+			if err != nil {
+				return cfg, err
 			}
-			cfg.SigningSecret = d.Val()
+			cfg.SigningSecret = value
 		case "backend":
-			if !d.NextArg() {
-				return cfg, d.ArgErr()
+			value, err := parseSingleArgDirective(d, "backend")
+			if err != nil {
+				return cfg, err
 			}
-			cfg.Backend.Type = d.Val()
+			cfg.Backend.Type = value
 			nesting := d.Nesting()
 			for d.NextBlock(nesting) {
 				switch d.Val() {
 				case "root":
-					if !d.NextArg() {
-						return cfg, d.ArgErr()
+					value, err := parseSingleArgDirective(d, "root")
+					if err != nil {
+						return cfg, err
 					}
-					cfg.Backend.Root = d.Val()
+					cfg.Backend.Root = value
 				default:
 					return cfg, d.Errf(`unrecognized backend subdirective "%s"`, d.Val())
 				}
@@ -335,11 +372,23 @@ func newObjectStore(cfg StoreConfig) (objectStore, error) {
 	}
 }
 
-func parsePositiveIntDirective(d *caddyfile.Dispenser, name string) (int, error) {
+func parseSingleArgDirective(d *caddyfile.Dispenser, name string) (string, error) {
 	if !d.NextArg() {
-		return 0, d.ArgErr()
+		return "", d.ArgErr()
 	}
-	value, err := strconv.Atoi(d.Val())
+	value := d.Val()
+	if d.NextArg() {
+		return "", d.Errf(`too many arguments for "%s": %s`, name, d.Val())
+	}
+	return value, nil
+}
+
+func parsePositiveIntDirective(d *caddyfile.Dispenser, name string) (int, error) {
+	raw, err := parseSingleArgDirective(d, name)
+	if err != nil {
+		return 0, err
+	}
+	value, err := strconv.Atoi(raw)
 	if err != nil || value <= 0 {
 		return 0, d.Errf("failed to parse %s as a positive integer", name)
 	}
@@ -347,10 +396,11 @@ func parsePositiveIntDirective(d *caddyfile.Dispenser, name string) (int, error)
 }
 
 func parsePositiveInt64Directive(d *caddyfile.Dispenser, name string) (int64, error) {
-	if !d.NextArg() {
-		return 0, d.ArgErr()
+	raw, err := parseSingleArgDirective(d, name)
+	if err != nil {
+		return 0, err
 	}
-	value, err := strconv.ParseInt(d.Val(), 10, 64)
+	value, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || value <= 0 {
 		return 0, d.Errf("failed to parse %s as a positive integer", name)
 	}
@@ -358,10 +408,11 @@ func parsePositiveInt64Directive(d *caddyfile.Dispenser, name string) (int64, er
 }
 
 func parsePositiveDurationDirective(d *caddyfile.Dispenser, name string) (time.Duration, error) {
-	if !d.NextArg() {
-		return 0, d.ArgErr()
+	raw, err := parseSingleArgDirective(d, name)
+	if err != nil {
+		return 0, err
 	}
-	value, err := time.ParseDuration(d.Val())
+	value, err := time.ParseDuration(raw)
 	if err != nil || value <= 0 {
 		return 0, d.Errf("failed to parse %s as a positive duration", name)
 	}
@@ -395,10 +446,12 @@ func loggerOrDefault(logger *slog.Logger) *slog.Logger {
 
 var (
 	_ caddy.Module                = (*Upload)(nil)
+	_ caddy.App                   = (*Upload)(nil)
 	_ caddy.Provisioner           = (*Upload)(nil)
 	_ caddy.CleanerUpper          = (*Upload)(nil)
 	_ caddyfile.Unmarshaler       = (*Upload)(nil)
 	_ caddy.Module                = (*UploadHandler)(nil)
+	_ caddy.Provisioner           = (*UploadHandler)(nil)
 	_ caddyfile.Unmarshaler       = (*UploadHandler)(nil)
 	_ caddyhttp.MiddlewareHandler = (*UploadHandler)(nil)
 )

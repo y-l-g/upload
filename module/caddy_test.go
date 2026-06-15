@@ -1,6 +1,7 @@
 package upload
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,32 @@ func TestUnmarshalStoreConfig(t *testing.T) {
 	}
 	if time.Duration(cfg.TokenTTL) != 5*time.Minute || cfg.MaxUploadBytes != 4096 || cfg.MaxConcurrency != 4 {
 		t.Fatalf("unexpected limits: %#v", cfg)
+	}
+}
+
+func TestUnmarshalStoreConfigRejectsExtraDirectiveArguments(t *testing.T) {
+	tests := map[string]string{
+		"worker":           "worker public/upload-worker.php extra",
+		"signing_secret":   "signing_secret secret extra",
+		"root":             "backend local {\n\t\t\t\troot storage/app/pogo-uploads extra\n\t\t\t}",
+		"token_ttl":        "token_ttl 5m extra",
+		"max_upload_bytes": "max_upload_bytes 4096 extra",
+		"max_concurrency":  "max_concurrency 4 extra",
+		"read_timeout":     "read_timeout 2s extra",
+		"complete_timeout": "complete_timeout 3s extra",
+		"progress_ttl":     "progress_ttl 4m extra",
+	}
+
+	for name, directive := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseUploadConfig(t, "pogo_upload {\n\tstore default {\n\t\t"+directive+"\n\t}\n}")
+			if err == nil {
+				t.Fatal("expected extra argument error")
+			}
+			if !strings.Contains(err.Error(), "too many arguments") {
+				t.Fatalf("expected too many arguments error, got %v", err)
+			}
+		})
 	}
 }
 

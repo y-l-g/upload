@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/caddyserver/caddy/v2"
 )
 
 func TestManagerProgressAndCancel(t *testing.T) {
@@ -14,10 +16,11 @@ func TestManagerProgressAndCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	intent := uploadIntent{
-		UploadID: "upl_test",
-		Store:    defaultStoreName,
-		Key:      "avatar.txt",
-		MaxBytes: 100,
+		UploadID:  "upl_test",
+		Store:     defaultStoreName,
+		Key:       "avatar.txt",
+		MaxBytes:  100,
+		ExpiresAt: time.Unix(200, 0).UTC(),
 	}
 	if err := store.startProgress(intent, cancel, time.Unix(100, 0).UTC()); err != nil {
 		t.Fatalf("start progress failed: %v", err)
@@ -62,6 +65,39 @@ func TestManagerStatusFiltersStore(t *testing.T) {
 	}
 	if !status.Ready || len(status.Stores) != 1 || status.Stores[0].WorkerThreads != 3 {
 		t.Fatalf("unexpected status: %#v", status)
+	}
+}
+
+func TestStoreRuntimeUsedUploadReservationExpires(t *testing.T) {
+	m := newTestManager(t, t.TempDir(), &fakeWorkers{response: `{"ok":true}`, threads: 1})
+	store := m.stores[defaultStoreName]
+	store.cfg.ProgressTTL = caddy.Duration(time.Second)
+	now := time.Unix(100, 0).UTC()
+	intent := uploadIntent{
+		UploadID:  "upl_test",
+		Store:     defaultStoreName,
+		Key:       "avatar.txt",
+		MaxBytes:  100,
+		ExpiresAt: now.Add(10 * time.Second),
+	}
+
+	_, cancel := context.WithCancel(context.Background())
+	if err := store.startProgress(intent, cancel, now); err != nil {
+		t.Fatalf("start progress failed: %v", err)
+	}
+	store.finishProgress(intent.UploadID, progressCompleted, now)
+	if progress := store.getProgress(intent.UploadID, now.Add(2*time.Second)); progress != nil {
+		t.Fatalf("expected progress record to be cleaned up, got %#v", progress)
+	}
+
+	_, cancelBeforeExpiry := context.WithCancel(context.Background())
+	if err := store.startProgress(intent, cancelBeforeExpiry, now.Add(2*time.Second)); err == nil {
+		t.Fatal("expected used upload reservation to reject reuse before token expiry")
+	}
+
+	_, cancelAfterExpiry := context.WithCancel(context.Background())
+	if err := store.startProgress(intent, cancelAfterExpiry, intent.ExpiresAt.Add(time.Second)); err != nil {
+		t.Fatalf("expected reservation to expire after token expiry, got %v", err)
 	}
 }
 

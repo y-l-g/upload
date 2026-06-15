@@ -38,9 +38,10 @@ type storeRuntime struct {
 
 	sem chan struct{}
 
-	progressMu sync.Mutex
-	progress   map[string]*progressRecord
-	counters   storeCounters
+	progressMu  sync.Mutex
+	progress    map[string]*progressRecord
+	usedUploads map[string]time.Time
+	counters    storeCounters
 
 	closed atomic.Bool
 }
@@ -121,13 +122,14 @@ func newManager(stores map[string]*storeRuntime) *manager {
 
 func newStoreRuntime(cfg StoreConfig, backend objectStore, workers frankenphp.Workers, logger *slog.Logger, metrics *Metrics) *storeRuntime {
 	return &storeRuntime{
-		cfg:      cfg,
-		backend:  backend,
-		worker:   workers,
-		logger:   loggerOrDefault(logger),
-		metrics:  metrics,
-		sem:      make(chan struct{}, cfg.MaxConcurrency),
-		progress: make(map[string]*progressRecord),
+		cfg:         cfg,
+		backend:     backend,
+		worker:      workers,
+		logger:      loggerOrDefault(logger),
+		metrics:     metrics,
+		sem:         make(chan struct{}, cfg.MaxConcurrency),
+		progress:    make(map[string]*progressRecord),
+		usedUploads: make(map[string]time.Time),
 	}
 }
 
@@ -318,6 +320,9 @@ func (s *storeRuntime) startProgress(intent uploadIntent, cancel context.CancelF
 	if _, exists := s.progress[intent.UploadID]; exists {
 		return errObjectExists
 	}
+	if err := s.reserveUploadLocked(intent, now); err != nil {
+		return err
+	}
 	s.progress[intent.UploadID] = &progressRecord{
 		UploadID:  intent.UploadID,
 		State:     progressReceiving,
@@ -451,6 +456,27 @@ func (s *storeRuntime) cleanupLocked(now time.Time) {
 		}
 		if now.Sub(record.FinishedAt) > ttl {
 			delete(s.progress, id)
+		}
+	}
+	s.cleanupUsedUploadsLocked(now)
+}
+
+func (s *storeRuntime) reserveUploadLocked(intent uploadIntent, now time.Time) error {
+	if _, exists := s.usedUploads[intent.UploadID]; exists {
+		return errObjectExists
+	}
+	expiresAt := intent.ExpiresAt
+	if expiresAt.IsZero() || expiresAt.Before(now) {
+		expiresAt = now
+	}
+	s.usedUploads[intent.UploadID] = expiresAt
+	return nil
+}
+
+func (s *storeRuntime) cleanupUsedUploadsLocked(now time.Time) {
+	for id, expiresAt := range s.usedUploads {
+		if !now.Before(expiresAt) {
+			delete(s.usedUploads, id)
 		}
 	}
 }

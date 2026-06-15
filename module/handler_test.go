@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/caddyserver/caddy/v2"
 )
 
 func TestUploadHandlerStoresFileAndSendsCompletedEvent(t *testing.T) {
@@ -148,6 +150,71 @@ func TestUploadHandlerRejectsTokenReuseWhileProgressKnown(t *testing.T) {
 	second := performUpload(t, response.URL, "application/octet-stream", "hello")
 	if second.Code != http.StatusConflict {
 		t.Fatalf("expected conflict, got %d %s", second.Code, second.Body.String())
+	}
+}
+
+func TestUploadHandlerRejectsTokenReuseAfterProgressCleanup(t *testing.T) {
+	root := t.TempDir()
+	worker := &fakeWorkers{response: `{"ok":true}`, threads: 1}
+	m := newTestManager(t, root, worker)
+	store := m.stores[defaultStoreName]
+	store.cfg.ProgressTTL = caddy.Duration(time.Second)
+	withGlobalManager(t, m)
+
+	response := createTestIntent(t, m, `{
+		"key":"avatar.txt",
+		"max_bytes":100,
+		"overwrite":true,
+		"expires_in":3600
+	}`)
+	first := performUpload(t, response.URL, "application/octet-stream", "first")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first upload failed: %d %s", first.Code, first.Body.String())
+	}
+
+	if progress := store.getProgress(response.UploadID, time.Now().UTC().Add(2*time.Second)); progress != nil {
+		t.Fatalf("expected progress to be cleaned up, got %#v", progress)
+	}
+
+	second := performUpload(t, response.URL, "application/octet-stream", "second")
+	if second.Code != http.StatusConflict {
+		t.Fatalf("expected conflict after progress cleanup, got %d %s", second.Code, second.Body.String())
+	}
+}
+
+func TestUploadHandlerUsesBoundManagerOverGlobalManager(t *testing.T) {
+	rootA := t.TempDir()
+	workerA := &fakeWorkers{response: `{"ok":true}`, threads: 1}
+	managerA := newTestManager(t, rootA, workerA)
+
+	rootB := t.TempDir()
+	workerB := &fakeWorkers{response: `{"ok":true}`, threads: 1}
+	managerB := newTestManager(t, rootB, workerB)
+	withGlobalManager(t, managerB)
+
+	response := createTestIntent(t, managerA, `{"key":"avatar.txt","max_bytes":100}`)
+	req := httptest.NewRequest(http.MethodPut, response.URL, strings.NewReader("hello"))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	rec := httptest.NewRecorder()
+	handler := &UploadHandler{Store: defaultStoreName, manager: managerA}
+
+	if err := handler.ServeHTTP(rec, req, nil); err != nil {
+		t.Fatalf("serve failed: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(rootA, "avatar.txt")); err != nil {
+		t.Fatalf("expected file in bound manager root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rootB, "avatar.txt")); !os.IsNotExist(err) {
+		t.Fatalf("file should not be written through global manager, stat err=%v", err)
+	}
+	if workerA.calls.Load() != 1 {
+		t.Fatalf("expected bound manager worker call, got %d", workerA.calls.Load())
+	}
+	if workerB.calls.Load() != 0 {
+		t.Fatalf("global manager worker should not be called, got %d", workerB.calls.Load())
 	}
 }
 
